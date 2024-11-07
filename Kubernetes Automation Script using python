@@ -1,0 +1,520 @@
+### 
+Documentation for Kubernetes Automation Script using python
+
+
+This documentation outlines the setup and usage of a Python script designed to automate Kubernetes operations, including the installation of the helm, keda, creation of deployments, services, and KEDA-based Horizontal Pod Autoscalers (HPAs), the health status of the deployment and provides details of the deployment.
+Prerequisites for Running the CLI Script
+To ensure the successful execution of the CLI script, the following prerequisites must be met:
+Python 3.7+
+Ensure Python 3.7 or later is installed on your system.
+Kubernetes Cluster
+You must have access to a running Kubernetes cluster. Ensure that the kubectl CLI is installed and configured to interact with your Kubernetes cluster.
+Kubeconfig File
+A kubeconfig file is required to authenticate and connect to your Kubernetes cluster. This file is typically located in ~/.kube/config, or you can specify its path in the configuration JSON file.
+Helm 3+
+Helm 3 is required for installing and managing Kubernetes applications. If Helm is not already installed, the script will automatically install it.
+KEDA
+The script installs KEDA (Kubernetes Event-driven Autoscaling) if not already installed. KEDA will be used for autoscaling based on Prometheus metrics.
+Python Kubernetes Client
+Install the official Kubernetes Python client using the following command:
+
+
+pip install kubernetes
+
+
+Prometheus Metrics Server
+The script uses Prometheus for autoscaling. Ensure that the Prometheus server is deployed and accessible in your cluster for metrics retrieval. You will need the Prometheus server address and query details for the KEDA autoscaling configuration.
+Access to Helm Repositories
+The script installs KEDA via Helm from the KEDA chart repository. Ensure that your system can access external Helm repositories.
+Permissions
+Ensure you have the necessary permissions to create namespaces, deployments, services, and Horizontal Pod Autoscalers in the specified namespace.
+Configuration File (config.json)
+Create a config.json file that contains the necessary configuration parameters. The file should include the following parameters:
+kubeconfig_path: Path to the kubeconfig file.
+namespace: Namespace where the deployment and services will be created.
+deployment_name: Name of the deployment to be created.
+image_name: Docker image for the container in the deployment.
+cpu_request, memory_request: Resource requests for the container.
+cpu_limit, memory_limit: Resource limits for the container.
+ports: List of ports to expose.
+service_port: Port for the service.
+service_type: Type of service (e.g., ClusterIP, LoadBalancer).
+hpa_min_replicas, hpa_max_replicas: Horizontal Pod Autoscaler replica count settings.
+prometheus_server_address: Prometheus server address for autoscaling.
+metric_name: Metric name for autoscaling.
+prometheus_query: Query used to retrieve the metric from Prometheus.
+hpa_threshold: Threshold for autoscaling based on the metric.
+
+Config.json:
+{
+   "kubeconfig_path": "/home/vaibhav/.kube/config",
+   "deployment_name": "my-deployment",
+   "image_name": "nginx:latest",
+   "cpu_request": "100m",
+   "memory_request": "256Mi",
+   "cpu_limit": "200m",
+   "memory_limit": "512Mi",
+   "ports": [80],
+   "service_port": 80,
+   "hpa_target_cpu": 50,
+   "hpa_min_replicas": 1,
+   "hpa_max_replicas": 5,
+   "namespace": "task1",
+   "service_type": "ClusterIP",
+   "prometheus_server_address": "https://centralprometheus.thinksys.com/",
+   "metric_name": "http_requests_total",
+   "prometheus_query": "sum(rate(http_requests_total[5m]))",
+   "hpa_threshold": 100
+}
+
+
+
+
+k8s_automation.py
+
+import json
+import subprocess
+from kubernetes import client, config
+from kubernetes.client.rest import ApiException
+import sys
+
+
+def load_config(file_path):
+   """Load configuration from a JSON file."""
+   with open(file_path) as f:
+       return json.load(f)
+
+
+def connect_to_cluster(config_path):
+   """Connect to the Kubernetes cluster using kubeconfig."""
+   try:
+       config_data = load_config(config_path)
+       kubeconfig_path = config_data["kubeconfig_path"]
+       config.load_kube_config(config_file=kubeconfig_path)
+       print("Successfully connected to the Kubernetes cluster.")
+   except Exception as e:
+       print(f"Error connecting to the cluster: {e}")
+
+
+def install_helm():
+   """Install Helm if not already installed."""
+   try:
+       # Check if Helm is installed
+       subprocess.run(["helm", "version"], check=True)
+       print("Helm is already installed.")
+   except FileNotFoundError:
+       print("Helm is not installed. Installing Helm...")
+       # Install Helm using curl with shell=True
+       subprocess.run("curl -fsSL https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 | bash", shell=True, check=True)
+       print("Helm installation completed.")
+   except subprocess.CalledProcessError as e:
+       print(f"Error checking Helm installation: {e}")
+
+
+
+
+def install_keda():
+   """Install KEDA if not already installed."""
+   try:
+       # Check if KEDA is installed by checking for its deployment
+       result = subprocess.run(
+           ["kubectl", "get", "deployment", "keda-operator", "-n", "keda"],
+           capture_output=True,
+           text=True
+       )
+      
+       if "keda-operator" in result.stdout:
+           print("KEDA is already installed.")
+           return
+      
+       print("Installing KEDA...")
+       # Add KEDA Helm repository
+       subprocess.run(["helm", "repo", "add", "kedacore", "https://kedacore.github.io/charts"], check=True)
+      
+       # Update Helm repository
+       subprocess.run(["helm", "repo", "update"], check=True)
+      
+       # Install KEDA
+       subprocess.run(["helm", "install", "keda", "kedacore/keda", "--namespace", "keda", "--create-namespace"], check=True)
+      
+       print("KEDA installation completed.")
+      
+   except subprocess.CalledProcessError as e:
+       print(f"Error installing KEDA: {e}")
+   except Exception as e:
+       print(f"An unexpected error occurred: {e}")
+
+
+
+
+def check_namespace(namespace):
+   """Check if a namespace exists; create it if it does not."""
+   core_v1 = client.CoreV1Api()
+   try:
+       # List all namespaces
+       namespaces = core_v1.list_namespace()
+       existing_namespaces = [ns.metadata.name for ns in namespaces.items]
+      
+       if namespace in existing_namespaces:
+           print(f"Namespace '{namespace}' already exists.")
+       else:
+           # Create the namespace
+           print(f"Creating namespace '{namespace}'...")
+           ns_body = {
+               "apiVersion": "v1",
+               "kind": "Namespace",
+               "metadata": {"name": namespace}
+           }
+           core_v1.create_namespace(body=ns_body)
+           print(f"Namespace '{namespace}' created successfully.")
+   except Exception as e:
+       print(f"Error checking or creating namespace: {e}")
+
+
+def check_deployment(deployment_name, namespace):
+   """Check if a deployment exists in the specified namespace."""
+   apps_v1 = client.AppsV1Api()
+   try:
+       apps_v1.read_namespaced_deployment(name=deployment_name, namespace=namespace)
+       print(f"Deployment '{deployment_name}' already exists in namespace '{namespace}'.")
+       return True  # Deployment exists
+   except Exception as e:
+       if "NotFound" in str(e):
+           print(f"Deployment '{deployment_name}' does not exist in namespace '{namespace}'.")
+           return False  # Deployment does not exist
+       else:
+           print(f"Error checking deployment: {e}")
+           return False
+
+
+def check_service(service_name, namespace):
+   """Check if a service exists in the specified namespace."""
+   core_v1 = client.CoreV1Api()
+   try:
+       core_v1.read_namespaced_service(name=service_name, namespace=namespace)
+       print(f"Service '{service_name}' already exists in namespace '{namespace}'.")
+       return True  # Service exists
+   except Exception as e:
+       if "NotFound" in str(e):
+           print(f"Service '{service_name}' does not exist in namespace '{namespace}'.")
+           return False  # Service does not exist
+       else:
+           print(f"Error checking service: {e}")
+           return False
+      
+# def check_hpa(hpa_name, namespace):
+#     """Check if a Horizontal Pod Autoscaler (HPA) exists in the specified namespace."""
+#     autoscaling_v1 = client.AutoscalingV1Api()
+#     try:
+#         autoscaling_v1.read_namespaced_horizontal_pod_autoscaler(name=hpa_name, namespace=namespace)
+#         print(f"HPA '{hpa_name}' already exists in namespace '{namespace}'.")
+#         return True  # HPA exists
+#     except Exception as e:
+#         if "NotFound" in str(e):
+#             print(f"HPA '{hpa_name}' does not exist in namespace '{namespace}'.")
+#             return False  # HPA does not exist
+#         else:
+#             print(f"Error checking HPA: {e}")
+#             return False
+
+
+def create_deployment():
+   """Create a deployment in Kubernetes using parameters from config.json."""
+   config_data = load_config('config.json')
+  
+   # Check and create the namespace
+   check_namespace(config_data["namespace"])
+  
+   # Check if the deployment already exists
+   if check_deployment(config_data["deployment_name"], config_data["namespace"]):
+       return  # Exit if deployment already exists
+  
+   apps_v1 = client.AppsV1Api()
+  
+   deployment = {
+       "apiVersion": "apps/v1",
+       "kind": "Deployment",
+       "metadata": {"name": config_data["deployment_name"],
+                    "namespace": config_data["namespace"]},
+       "spec": {
+           "replicas": 1,
+           "selector": {"matchLabels": {"app": config_data["deployment_name"]}},
+           "template": {
+               "metadata": {"labels": {"app": config_data["deployment_name"]}},
+               "spec": {
+                   "containers": [{
+                       "name": config_data["deployment_name"],
+                       "image": config_data["image_name"],
+                       "resources": {
+                           "requests": {
+                               "cpu": config_data["cpu_request"],
+                               "memory": config_data["memory_request"]
+                           },
+                           "limits": {
+                               "cpu": config_data["cpu_limit"],
+                               "memory": config_data["memory_limit"]
+                           }
+                       },
+                       "ports": [{"containerPort": port} for port in config_data["ports"]]
+                   }]
+               }
+           }
+       }
+   }
+  
+   try:
+       apps_v1.create_namespaced_deployment(namespace=config_data["namespace"], body=deployment)
+       print(f"Deployment '{config_data['deployment_name']}' created successfully in namespace '{config_data['namespace']}'.")
+   except Exception as e:
+       print(f"Error creating deployment: {e}")
+
+
+def create_service():
+   """Create a service in Kubernetes using parameters from config.json."""
+   config_data = load_config('config.json')
+  
+   core_v1 = client.CoreV1Api()
+  
+   service_name = f"{config_data['deployment_name']}-service"
+  
+   # Check if the service already exists
+   if check_service(service_name, config_data['namespace']):
+       return  # Exit if service already exists
+  
+   service = {
+       'apiVersion': 'v1',
+       'kind': 'Service',
+       'metadata': {
+           'name': service_name,
+           'namespace': config_data['namespace']
+       },
+       'spec': {
+           'selector': {
+               'app': config_data['deployment_name']
+           },
+           'ports': [{
+               'protocol': 'TCP',
+               'port': config_data['service_port'],
+               'targetPort': config_data['ports'][0]  # Assuming first port is used for target
+           }],
+           'type': config_data['service_type']  # Use the service type from configuration
+       }
+   }
+  
+   try:
+       core_v1.create_namespaced_service(namespace=config_data['namespace'], body=service)
+       print(f"Service '{service_name}' created successfully in namespace '{config_data['namespace']}'.")
+   except Exception as e:
+       print(f"Error creating service: {e}")
+
+
+def create_prometheus_hpa(config_data):
+   """Check if a KEDA ScaledObject exists, and create it with Prometheus metrics if not."""
+  
+   # Configure the ScaledObject name and namespace
+   scaled_object_name = f"{config_data['deployment_name']}-scaledobject"
+   namespace = config_data['namespace']
+  
+   # Initialize the KEDA API client
+   keda_api = client.CustomObjectsApi()
+  
+   # Check if the ScaledObject already exists
+   if check_scaled_object(scaled_object_name, namespace, keda_api):
+       return  # Exit if ScaledObject already exists
+
+
+   # Define the ScaledObject configuration for Prometheus metrics
+   scaled_object_body = {
+       "apiVersion": "keda.sh/v1alpha1",
+       "kind": "ScaledObject",
+       "metadata": {
+           "name": scaled_object_name,
+           "namespace": namespace
+       },
+       "spec": {
+           "scaleTargetRef": {
+               "name": config_data["deployment_name"],
+               "kind": "Deployment"
+           },
+           "minReplicaCount": config_data["hpa_min_replicas"],
+           "maxReplicaCount": config_data["hpa_max_replicas"],
+           "triggers": [
+               {
+                   "type": "prometheus",
+                   "metadata": {
+                       "serverAddress": config_data['prometheus_server_address'],
+                       "metricName": config_data['metric_name'],
+                       "threshold": str(config_data['hpa_threshold']),
+                       "query": config_data['prometheus_query']
+
+
+                   }
+               }
+           ]
+       }
+   }
+
+
+   # Attempt to create the ScaledObject
+   try:
+       keda_api.create_namespaced_custom_object(
+           group="keda.sh",
+           version="v1alpha1",
+           namespace=namespace,
+           plural="scaledobjects",
+           body=scaled_object_body
+       )
+       print(f"KEDA ScaledObject '{scaled_object_name}' created successfully for deployment '{config_data['deployment_name']}'.")
+      
+   except Exception as e:
+       print(f"Error creating ScaledObject: {e}")
+
+
+def check_scaled_object(scaled_object_name, namespace, keda_api):
+   """Check if a ScaledObject exists in the specified namespace."""
+   try:
+       keda_api.get_namespaced_custom_object(
+           group="keda.sh",
+           version="v1alpha1",
+           name=scaled_object_name,
+           namespace=namespace,
+           plural="scaledobjects"
+       )
+       print(f"ScaledObject '{scaled_object_name}' already exists in namespace '{namespace}'.")
+       return True  # ScaledObject exists
+   except client.exceptions.ApiException as e:
+       if e.status == 404:
+           print(f"ScaledObject '{scaled_object_name}' does not exist in namespace '{namespace}'.")
+           return False  # ScaledObject does not exist
+       else:
+           print(f"Error checking ScaledObject: {e}")
+           return False
+
+
+def get_health_status(deployment_name, namespace):
+   """Retrieve health status of the specified deployment, including CPU and memory usage."""
+
+
+   # Load Kubernetes configuration
+   config.load_kube_config()
+   apps_v1 = client.AppsV1Api()
+   core_v1 = client.CoreV1Api()
+   custom_api = client.CustomObjectsApi()
+
+
+   try:
+       # Get deployment status
+       deployment = apps_v1.read_namespaced_deployment(name=deployment_name, namespace=namespace)
+       replicas = deployment.status.replicas or 0
+       available_replicas = deployment.status.available_replicas or 0
+
+
+       print(f"\nDeployment Status for '{deployment_name}':")
+       print(f"- Total Replicas: {replicas}")
+       print(f"- Available Replicas: {available_replicas}")
+
+
+       # Get pod statuses associated with this deployment
+       pods = core_v1.list_namespaced_pod(namespace=namespace, label_selector=f'app={deployment_name}')
+
+
+       for pod in pods.items:
+           pod_status = pod.status.phase
+           print(f"\nPod Name: {pod.metadata.name}")
+           print(f"- Status: {pod_status}")
+
+
+           container_statuses = pod.status.container_statuses or []
+           for container_status in container_statuses:
+               container_state = container_status.state
+               container_name = container_status.name
+
+
+               # Fetch CPU and memory usage from the metrics API
+               try:
+                   metrics = custom_api.get_namespaced_custom_object(
+                       group="metrics.k8s.io",
+                       version="v1beta1",
+                       namespace=namespace,
+                       plural="pods",
+                       name=pod.metadata.name
+                   )
+                   for container_metrics in metrics['containers']:
+                       if container_metrics['name'] == container_name:
+                           cpu_usage = container_metrics['usage']['cpu']
+                           memory_usage = container_metrics['usage']['memory']
+                           break
+                   else:
+                       cpu_usage = "N/A"
+                       memory_usage = "N/A"
+               except ApiException as e:
+                   cpu_usage = "N/A"
+                   memory_usage = "N/A"
+                   print(f"Warning: Could not retrieve metrics for {container_name}. Error: {e}", file=sys.stderr)
+
+
+               # Display container state and resource usage
+               print(f"- Container Name: {container_name}")
+               print(f"-- State: {'Running' if container_state.running else ('Waiting' if container_state.waiting else ('Terminated' if container_state.terminated else 'Unknown'))}")
+               print(f"-- CPU Usage: {cpu_usage}")
+               print(f"-- Memory Usage: {memory_usage}")
+
+
+           if available_replicas < replicas:
+               print("Warning: Some replicas are not available!")
+
+
+   except ApiException as e:
+       print(f"Error retrieving health status for deployment '{deployment_name}': {e}", file=sys.stderr)
+
+
+
+
+def return_deployment_details():
+  """Return details about deployment and service."""
+  config_data = load_config('config.json')
+  print("\nDeployment and Service Details:")
+  print(f"- Deployment Name: {config_data['deployment_name']}")
+  print(f"- Namespace: {config_data['namespace']}")
+  print(f"- Service Name: {config_data['deployment_name']}-service")
+  print(f"- Service Type: {config_data['service_type']}")
+  print(f"- Target CPU Utilization: {config_data['hpa_target_cpu']}%")
+  print(f"- Min Replicas: {config_data['hpa_min_replicas']}, Max Replicas: {config_data['hpa_max_replicas']}")
+
+
+
+
+if __name__ == "__main__":
+   # Load configuration and connect to cluster
+   connect_to_cluster('config.json')
+
+
+   # Load configuration after connecting to cluster
+   config_data = load_config('config.json')
+  
+   # Install Helm
+   install_helm()
+  
+   # Install KEDA
+   install_keda()
+
+
+   # Create Deployment
+   create_deployment()
+
+
+   # Create Service
+   create_service()
+
+
+   # Create HPA
+   create_prometheus_hpa(config_data)
+
+
+   # Return deployment details
+   return_deployment_details()
+
+
+   # Get health status of the deployment after creation
+   get_health_status(config_data["deployment_name"], config_data["namespace"])
+
